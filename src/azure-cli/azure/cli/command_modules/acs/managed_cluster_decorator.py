@@ -6415,6 +6415,8 @@ class AKSManagedClusterCreateDecorator(BaseAKSManagedClusterDecorator):
         mc = self.set_up_http_proxy_config(mc)
         # set up workload autoscaler profile
         mc = self.set_up_workload_auto_scaler_profile(mc)
+        # set up app routing profile
+        mc = self.set_up_ingress_web_app_routing(mc)
 
         # setup k8s support plan
         mc = self.set_up_k8s_support_plan(mc)
