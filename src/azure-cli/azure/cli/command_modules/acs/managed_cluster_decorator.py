@@ -6451,19 +6451,13 @@ class AKSManagedClusterCreateDecorator(BaseAKSManagedClusterDecorator):
             "need_post_creation_vnet_permission_granting", default_value=False
         )
 
-        keyvault_id = self.context.get_keyvault_id()
-        enable_azure_keyvault_secrets_provider_addon = self.context.get_enable_kv() or (
-            mc.addon_profiles and mc.addon_profiles.get(CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME)
-            and mc.addon_profiles[CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME].enabled)
-
         if (
             monitoring_addon_enabled or
             ingress_appgw_addon_enabled or
             virtual_node_addon_enabled or
             azuremonitormetrics_addon_enabled or
             (enable_managed_identity and attach_acr) or
-            need_grant_vnet_permission_to_cluster_identity or
-            enable_azure_keyvault_secrets_provider_addon
+            need_grant_vnet_permission_to_cluster_identity
         ):
             return True
         return False
@@ -6589,63 +6583,6 @@ class AKSManagedClusterCreateDecorator(BaseAKSManagedClusterDecorator):
                 self.context.get_disable_azure_monitor_metrics(),
                 True
             )
- 
-        # attach keyvault to app routing addon
-        from azure.cli.command_modules.keyvault.custom import set_policy
-        from azure.cli.command_modules.acs._client_factory import get_keyvault_client
-        keyvault_id = self.context.get_keyvault_id()
-        enable_azure_keyvault_secrets_provider_addon = (
-            self.context.get_enable_kv() or
-            (cluster.addon_profiles and
-             cluster.addon_profiles.get(CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME) and
-             cluster.addon_profiles[CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME].enabled)
-        )
-        if keyvault_id:
-            if enable_azure_keyvault_secrets_provider_addon:
-                if cluster.ingress_profile and \
-                   cluster.ingress_profile.web_app_routing and \
-                   cluster.ingress_profile.web_app_routing.enabled:
-                    if not is_valid_resource_id(keyvault_id):
-                        raise InvalidArgumentValueError("Please provide a valid keyvault ID")
-                    self.cmd.command_kwargs['operation_group'] = 'vaults'
-                    keyvault_params = parse_resource_id(keyvault_id)
-                    keyvault_subscription = keyvault_params['subscription']
-                    keyvault_name = keyvault_params['name']
-                    keyvault_rg = keyvault_params['resource_group']
-                    keyvault_client = get_keyvault_client(self.cmd.cli_ctx, subscription_id=keyvault_subscription)
-                    keyvault = keyvault_client.get(resource_group_name=keyvault_rg, vault_name=keyvault_name)
-                    managed_identity_object_id = cluster.ingress_profile.web_app_routing.identity.object_id
-                    is_service_principal = False
-
-                    try:
-                        if keyvault.properties.enable_rbac_authorization:
-                            if not self.context.external_functions.add_role_assignment(
-                                self.cmd,
-                                "Key Vault Secrets User",
-                                managed_identity_object_id,
-                                is_service_principal,
-                                scope=keyvault_id,
-                            ):
-                                logger.warning(
-                                    "Could not create a role assignment for App Routing. "
-                                    "Are you an Owner on this subscription?"
-                                )
-                        else:
-                            keyvault = set_policy(
-                                self.cmd,
-                                keyvault_client,
-                                keyvault_rg,
-                                keyvault_name,
-                                object_id=managed_identity_object_id,
-                                secret_permissions=["Get"],
-                                certificate_permissions=["Get"],
-                            )
-                    except Exception as ex:
-                        raise CLIError('Error in granting keyvault permissions to managed identity.\n') from ex
-                else:
-                    raise CLIError('App Routing must be enabled to attach keyvault.\n')
-            else:
-                raise CLIError('Keyvault secrets provider addon must be enabled to attach keyvault.\n')
 
     def put_mc(self, mc: ManagedCluster) -> ManagedCluster:
         if self.check_is_postprocessing_required(mc):
@@ -7926,12 +7863,17 @@ class AKSManagedClusterUpdateDecorator(BaseAKSManagedClusterDecorator):
         virtual_node_addon_enabled = self.context.get_intermediate("virtual_node_addon_enabled", default_value=False)
         enable_managed_identity = check_is_msi_cluster(mc)
         attach_acr = self.context.get_attach_acr()
+        keyvault_id = self.context.get_keyvault_id()
+        enable_azure_keyvault_secrets_provider_addon = self.context.get_enable_kv() or (
+            mc.addon_profiles and mc.addon_profiles.get(CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME)
+            and mc.addon_profiles[CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME].enabled)
 
         if (
             monitoring_addon_enabled or
             ingress_appgw_addon_enabled or
             virtual_node_addon_enabled or
-            (enable_managed_identity and attach_acr)
+            (enable_managed_identity and attach_acr) or
+            enable_azure_keyvault_secrets_provider_addon
         ):
             return True
         return False
@@ -8024,6 +7966,64 @@ class AKSManagedClusterUpdateDecorator(BaseAKSManagedClusterDecorator):
                     subscription_id=self.context.get_subscription_id(),
                     is_service_principal=False,
                 )
+        
+         # attach keyvault to app routing addon
+        from azure.cli.command_modules.keyvault.custom import set_policy
+        from azure.cli.command_modules.acs._client_factory import get_keyvault_client
+        keyvault_id = self.context.get_keyvault_id()
+        enable_azure_keyvault_secrets_provider_addon = (
+            self.context.get_enable_kv() or
+            (cluster.addon_profiles and
+             cluster.addon_profiles.get(CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME) and
+             cluster.addon_profiles[CONST_AZURE_KEYVAULT_SECRETS_PROVIDER_ADDON_NAME].enabled)
+        )
+        logger.warning("keyvaultid: %s, enable_kv: %s", keyvault_id, enable_azure_keyvault_secrets_provider_addon)
+        if keyvault_id:
+            if enable_azure_keyvault_secrets_provider_addon:
+                if cluster.ingress_profile and \
+                   cluster.ingress_profile.web_app_routing and \
+                   cluster.ingress_profile.web_app_routing.enabled:
+                    if not is_valid_resource_id(keyvault_id):
+                        raise InvalidArgumentValueError("Please provide a valid keyvault ID")
+                    self.cmd.command_kwargs['operation_group'] = 'vaults'
+                    keyvault_params = parse_resource_id(keyvault_id)
+                    keyvault_subscription = keyvault_params['subscription']
+                    keyvault_name = keyvault_params['name']
+                    keyvault_rg = keyvault_params['resource_group']
+                    keyvault_client = get_keyvault_client(self.cmd.cli_ctx, subscription_id=keyvault_subscription)
+                    keyvault = keyvault_client.get(resource_group_name=keyvault_rg, vault_name=keyvault_name)
+                    managed_identity_object_id = cluster.ingress_profile.web_app_routing.identity.object_id
+                    is_service_principal = False
+
+                    try:
+                        if keyvault.properties.enable_rbac_authorization:
+                            if not self.context.external_functions.add_role_assignment(
+                                self.cmd,
+                                "Key Vault Secrets User",
+                                managed_identity_object_id,
+                                is_service_principal,
+                                scope=keyvault_id,
+                            ):
+                                logger.warning(
+                                    "Could not create a role assignment for App Routing. "
+                                    "Are you an Owner on this subscription?"
+                                )
+                        else:
+                            keyvault = set_policy(
+                                self.cmd,
+                                keyvault_client,
+                                keyvault_rg,
+                                keyvault_name,
+                                object_id=managed_identity_object_id,
+                                secret_permissions=["Get"],
+                                certificate_permissions=["Get"],
+                            )
+                    except Exception as ex:
+                        raise CLIError('Error in granting keyvault permissions to managed identity.\n') from ex
+                else:
+                    raise CLIError('App Routing must be enabled to attach keyvault.\n')
+            else:
+                raise CLIError('Keyvault secrets provider addon must be enabled to attach keyvault.\n')
 
     def put_mc(self, mc: ManagedCluster) -> ManagedCluster:
         if self.check_is_postprocessing_required(mc):
